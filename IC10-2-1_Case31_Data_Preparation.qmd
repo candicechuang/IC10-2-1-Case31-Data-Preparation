@@ -1,0 +1,269 @@
+---
+title: "IC10-2-1: Data Preparation with Case 31"
+subtitle: "Employees Federal Credit Union"
+author: "Pei Yun Chuang"
+date: "2026-11-02"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    theme: cosmo
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## Overview
+
+This report prepares the Employees Federal Credit Union (EFCU) survey for analysis. The workflow preserves the original SPSS data, documents questionnaire coding, corrects metadata, checks missing values, recodes responses, evaluates possible indexes, and exports a cleaned SPSS file. The case questionnaire is the reference for interpreting variables.
+
+## 1. Import and inspect the data
+
+```{r}
+library(tidyverse)
+library(haven)
+library(labelled)
+library(psych)
+library(knitr)
+
+source_file <- "Case 31 Data_efcu_1.sav"
+stopifnot(file.exists(source_file))
+data_raw <- haven::read_sav(source_file)
+dim(data_raw)
+names(data_raw)
+dplyr::glimpse(data_raw)
+summary(data_raw)
+```
+
+**Answers.** The provided case dataset contains 128 observations and 34 columns. Variables named `q3` through `q38` (with gaps) are questionnaire items. `OverallEmployeePerformace` and `employeeperformance` appear to be precomputed measures rather than original questions. A variable label describes a variable, while value labels explain its numerical response codes. The imported file has missing values in q7 (10), q8 (21), and q37 (7), as documented in the instructor's reference output. The following code verifies those counts on the local file.
+
+```{r}
+missing_raw <- tibble(variable = names(data_raw),
+                      missing = vapply(data_raw, function(x) sum(is.na(x)), integer(1)))
+kable(filter(missing_raw, missing > 0))
+```
+
+## 2. Initial data dictionary and measurement scales
+
+```{r}
+make_dictionary <- function(df) {
+  tibble(
+    variable = names(df),
+    variable_label = vapply(df, function(x) {
+      z <- attr(x, "label"); if (is.null(z)) "" else as.character(z)
+    }, character(1)),
+    class = vapply(df, function(x) class(x)[1], character(1)),
+    distinct = vapply(df, function(x) dplyr::n_distinct(x), integer(1)),
+    missing = vapply(df, function(x) sum(is.na(x)), integer(1)),
+    value_labels = vapply(df, function(x) {
+      z <- attr(x, "labels")
+      if (is.null(z)) "" else paste(paste(unname(z), names(z), sep = " = "), collapse = "; ")
+    }, character(1))
+  )
+}
+kable(make_dictionary(data_raw))
+```
+
+**Answers.** The original labels for employee courtesy and professionalism are useful, but several labels are vague or incorrect: for example, q8 should describe borrowing rates, not statement frequency. Yes/no questions such as q27 and q38 are nominal. Awareness/use questions q13–q26 are ordered categories for a specific service, but not equally spaced attitude scores. Agreement items q3–q6 and q30–q34 are ordinal Likert responses, sometimes treated as approximately interval for tentative scale evaluation. Value labels are especially important for yes/no, awareness/use, special no-opinion codes, and scales whose numeric direction is not obvious.
+
+## 3. Repair labels and metadata
+
+```{r}
+data <- data_raw
+question_labels <- c(
+  q3="Employees are courteous", q4="Employees are helpful",
+  q5="Employees are professional", q6="Employees are always available",
+  q7="Interest rates paid on savings", q8="Interest rates charged on loans",
+  q9="Frequency of account statements", q10="Accuracy of account statements",
+  q11="Statements are easy to understand", q12="Account information kept confidential",
+  q13="Regular share accounts", q14="Special subaccounts",
+  q15="Christmas club accounts", q16="Individual retirement accounts",
+  q17="MasterCard credit cards", q18="Signature loans",
+  q19="New car loans", q20="Late model car loans",
+  q21="Older model car loans", q22="Household goods/appliance loans",
+  q23="Recreational loans", q24="Share collateralized loans",
+  q25="IRA loans", q26="Lines of credit loans",
+  q27="Currently have a credit union loan",
+  q30="Credit union loan rates are lower than elsewhere",
+  q31="Personnel protect confidential financial information",
+  q32="Loan applications are processed promptly",
+  q33="Financial services meet member needs",
+  q34="Loan applications are simple to complete",
+  q37="Overall management and operation rating",
+  q38="Live in the headquarters area"
+)
+for (nm in intersect(names(question_labels), names(data))) {
+  attr(data[[nm]], "label") <- unname(question_labels[[nm]])
+}
+
+set_values <- function(df, nm, labels) {
+  if (nm %in% names(df)) {
+    attr(df[[nm]], "labels") <- labels
+  }
+  df
+}
+agreement <- c("Strongly disagree"=1,"Disagree"=2,"Uncertain"=3,"Agree"=4,"Strongly agree"=5)
+for (nm in intersect(c(paste0("q",3:6), paste0("q",30:34)), names(data))) data <- set_values(data,nm,agreement)
+for (nm in c("q7","q8")) data <- set_values(data,nm,c("Very high"=1,"High"=2,"Average"=3,"Low"=4,"Very low"=5,"No opinion"=6))
+data <- set_values(data,"q9",c("Too often"=1,"Very often"=2,"About right"=3,"Not often enough"=4,"Never"=5))
+data <- set_values(data,"q10",c("Excellent"=1,"Good"=2,"Fair"=3,"Poor"=4))
+for (nm in c("q11","q12","q27","q38")) data <- set_values(data,nm,c("Yes"=1,"No"=2,"No answer"=3))
+for (nm in paste0("q",13:26)) data <- set_values(data,nm,c("Aware and used"=1,"Aware but not used"=2,"Unaware"=3))
+data <- set_values(data,"q37",c("Excellent"=1,"Good"=2,"Average"=3,"Poor"=4,"Very poor"=5,"No answer"=6))
+
+kable(make_dictionary(data) |> select(variable, variable_label, value_labels))
+```
+
+**Metadata decision.** I corrected labels against the questionnaire and replaced misleading value labels with the actual response wording. The raw object remains unchanged. Precomputed variables are retained for comparison but are not treated as original survey questions.
+
+## 4. Create an analysis copy and check data quality
+
+```{r}
+range_rules <- list(
+  q3=1:5,q4=1:5,q5=1:5,q6=1:5,q7=1:6,q8=1:6,
+  q9=1:5,q10=1:4,q11=1:3,q12=1:3,
+  q27=1:3,q30=1:5,q31=1:5,q32=1:5,q33=1:5,q34=1:5,
+  q37=1:6,q38=1:3
+)
+for (nm in paste0("q",13:26)) range_rules[[nm]] <- 1:3
+range_check <- purrr::imap_dfr(range_rules, function(valid,nm) {
+  if (!nm %in% names(data)) return(tibble())
+  x <- as.numeric(data[[nm]])
+  tibble(variable=nm, out_of_range=sum(!is.na(x) & !(x %in% valid)))
+})
+kable(range_check)
+
+# Inspect precomputed fields without overwriting them.
+if (all(c("OverallEmployeePerformace","employeeperformance") %in% names(data))) {
+  print(all.equal(as.numeric(data$OverallEmployeePerformace), as.numeric(data$employeeperformance)))
+}
+```
+
+**Decision.** Any out-of-range values should be investigated rather than silently changed. The two similarly named precomputed fields should be checked for duplication. The questionnaire does not contain every question number in this particular SPSS extract, so missing columns are not automatically errors.
+
+## 5. Recode special responses and reverse-code selected items
+
+```{r}
+# Recode no-opinion/no-answer categories to missing while retaining original data_raw.
+for (nm in intersect(c("q7","q8","q37"),names(data))) {
+  x <- as.numeric(data[[nm]])
+  x[x == 6] <- NA_real_
+  data[[nm]] <- x
+  attr(data[[nm]], "label") <- unname(question_labels[[nm]])
+}
+
+# Higher values now indicate a more favorable evaluation.
+for (nm in c("q7","q8","q10","q37")) {
+  top <- if (nm == "q10") 5 else 6
+  new_name <- paste0(nm,"r")
+  data[[new_name]] <- top - as.numeric(data[[nm]])
+  attr(data[[new_name]], "label") <- paste("Reversed:",question_labels[[nm]])
+}
+
+# q9 is not a linear favorability scale: about right is its middle category.
+data$q9_about_right <- ifelse(is.na(data$q9),NA_integer_,as.integer(as.numeric(data$q9)==3))
+attr(data$q9_about_right,"label") <- "Statement frequency is about right"
+
+# Demonstration only: reverse the order of service-awareness categories.
+# This is NOT a psychological attitude score.
+for (nm in paste0("q",13:26)) {
+  new_name <- paste0(nm,"r")
+  data[[new_name]] <- 4 - as.numeric(data[[nm]])
+  attr(data[[new_name]],"label") <- paste("Reordered awareness category:",question_labels[[nm]])
+}
+```
+
+**Answers.** q9 should not be reversed using a simple arithmetic formula because both overly frequent and insufficient statements may be undesirable. A binary indicator for "about right" is more interpretable. Questions q13–q26 measure awareness and use of different financial services. They should be summarized separately using counts or percentages, not averaged into one satisfaction score. Their reverse-coded copies are provided only to demonstrate the ordinal-category recoding requested in the instructions.
+
+```{r}
+for (nm in c("q7","q8","q10","q37","q13")) {
+  cat("\nVerification:",nm,"\n")
+  print(data |> count(.data[[nm]], .data[[paste0(nm,"r")]], name="n"))
+}
+```
+
+## 6. Evaluate candidate multi-item measures
+
+```{r}
+# Plain numeric copies are used for statistical testing; labelled data are preserved.
+employee_items <- data |> select(q3:q6) |> mutate(across(everything(),as.numeric))
+operations_items <- data |> select(q30:q34) |> mutate(across(everything(),as.numeric))
+
+employee_alpha <- psych::alpha(employee_items)
+operations_alpha <- psych::alpha(operations_items)
+employee_fa <- psych::fa(employee_items,nfactors=1,rotate="none",fm="minres")
+operations_fa <- psych::fa(operations_items,nfactors=1,rotate="none",fm="minres")
+
+reliability <- tibble(
+  measure=c("Employee proficiency","Operational effectiveness"),
+  raw_alpha=c(employee_alpha$total$raw_alpha,operations_alpha$total$raw_alpha)
+)
+kable(reliability,digits=3)
+
+kable(tibble(item=rownames(employee_alpha$item.stats),
+             r_drop=employee_alpha$item.stats$r.drop),digits=3)
+kable(tibble(item=rownames(operations_alpha$item.stats),
+             r_drop=operations_alpha$item.stats$r.drop),digits=3)
+
+kable(tibble(item=rownames(unclass(employee_fa$loadings)),
+             loading=as.numeric(employee_fa$loadings[,1])),digits=3)
+kable(tibble(item=rownames(unclass(operations_fa$loadings)),
+             loading=as.numeric(operations_fa$loadings[,1])),digits=3)
+```
+
+**Interpretation.** Employee proficiency (q3–q6) is a conceptually coherent set: courtesy, helpfulness, professionalism, and availability all describe employees. I recommend a provisional mean index if the reliability and loadings above support a shared factor. Operational effectiveness (q30–q34) covers more diverse issues, including loan pricing, confidentiality, timeliness, services, and application simplicity. The instructor's reference analysis reports weak-to-moderate one-factor loadings for several operational items, so I would not combine them automatically into one scale. The exact alpha and item-total results are calculated above and should be reviewed before making a final decision.
+
+```{r}
+# Employee index is defensible based on item content; inspect evidence above.
+data$employee_proficiency_index <- rowMeans(employee_items,na.rm=TRUE)
+data$employee_proficiency_index[is.nan(data$employee_proficiency_index)] <- NA_real_
+attr(data$employee_proficiency_index,"label") <- "Mean employee proficiency (q3-q6)"
+
+# Retain q30-q34 individually rather than forcing a weak operational index.
+summary(data$employee_proficiency_index)
+```
+
+## 7. Summary of data-preparation decisions
+
+- Preserved the original SPSS dataset in `data_raw`.
+- Inspected dimensions, names, labels, missingness, and permitted ranges.
+- Repaired questionnaire variable labels and category labels.
+- Converted special no-opinion/no-answer codes to missing for relevant variables.
+- Created reversed copies of directionally interpretable rating items.
+- Used a binary indicator for q9 rather than treating its midpoint as a direction.
+- Created separate reversed awareness categories only as a coding exercise.
+- Evaluated employee and operational item groups using alpha and one-factor loadings.
+- Retained operational effectiveness items separately pending stronger measurement evidence.
+
+## 8. Final data dictionary and checks
+
+```{r}
+final_dictionary <- make_dictionary(data)
+kable(final_dictionary)
+cat("Original dimensions:",nrow(data_raw),"x",ncol(data_raw),"\n")
+cat("Prepared dimensions:",nrow(data),"x",ncol(data),"\n")
+stopifnot(nrow(data)==nrow(data_raw))
+```
+
+## 9. Save cleaned SPSS data
+
+```{r}
+haven::write_sav(data,"Case31_EFCU_Prepared.sav")
+cat("Saved: Case31_EFCU_Prepared.sav\n")
+```
+
+## 10. Conclusion
+
+The cleaned dataset has clearer metadata, explicit missing-value handling, verified recodes, and a documented provisional employee proficiency measure. Keeping the original file intact makes the process reproducible. Operational effectiveness should be interpreted item by item unless additional measurement testing supports an index.
+
+## Appendix: GitHub links
+
+**GitHub Repository:** [IC10-2-1 Case 31 Repository](https://github.com/candicechuang/IC10-2-1-Case31-Data-Preparation)
+
+**GitHub Pages (HTML):** [View the published HTML report](https://candicechuang.github.io/IC10-2-1-Case31-Data-Preparation/)
+
+*These are proposed URLs based on the repository name `IC10-2-1-Case31-Data-Preparation`. Create that repository and publish `index.html` from the main branch root for the links to work.*
+
+**Reference:** [Instructor's Case 31 Data Preparation Instructions](https://jaejungca.github.io/case31/IC-M08-Data-Preparation-Case-31-R.html).
